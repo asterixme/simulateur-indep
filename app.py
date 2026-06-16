@@ -6,32 +6,37 @@ from core.optimization import compare_statuses, recommendation
 
 st.title("Simulateur indépendant")
 
-# Inputs utilisateur
-tjm = st.number_input("TJM", value=500)
-days = st.number_input("Jours travaillés", value=200)
+with st.expander("Informations personnelles"):
+    # Inputs utilisateur
+    tjm = st.number_input("TJM", value=0)
+    days = st.number_input("Jours travaillés", value=0)
 
-# Calcul revenu brut
-revenue = calculate_revenue(tjm, days)
 
-# Sélection du statut utilisateur (scénario courant)
-current_status = st.selectbox("Statut actuel", ["micro", "sasu", "ei"])
+with st.expander("Informations professionnelles"):
+    # Sélection du statut utilisateur (scénario courant)
+    current_status = st.selectbox("Statut actuel", ["micro", "sasu", "ei"])
 
-# Calcul net du scénario actuel
-net_current = calculate_net_income(revenue, current_status)
+with st.expander("Résulats simulation"):
+    # Calcul revenu brut
+    revenue = calculate_revenue(tjm, days)
 
-# Optimisation globale
-best_status, comparison = compare_statuses(revenue)
-rec = recommendation(revenue, best_status)
 
-# Affichage
-st.subheader("Résultats")
+    # Calcul net du scénario actuel
+    net_current = calculate_net_income(revenue, current_status)
 
-st.write("Revenu brut :", revenue)
-st.write("Revenu net (scénario actuel) :", net_current)
+    # Optimisation globale
+    best_status, comparison = compare_statuses(revenue)
+    rec = recommendation(revenue, best_status)
 
-st.subheader("Comparaison des statuts")
-st.write(comparison)
+    # Affichage
+    st.subheader("Résultats")
 
-st.subheader("Optimisation")
-st.write("Meilleur statut :", best_status)
-st.write(rec)
+    st.write("Revenu brut :", revenue)
+    st.write("Revenu net (scénario actuel) :", net_current)
+
+    st.subheader("Comparaison des statuts")
+    st.write(comparison)
+
+    st.subheader("Optimisation")
+    st.write("Meilleur statut :", best_status)
+    st.write(rec)
