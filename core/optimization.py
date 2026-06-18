@@ -2,7 +2,7 @@
 optimization.py — Compare les statuts juridiques et génère une recommandation
 """
 
-from core.income import simuler_micro, simuler_eurl_is, simuler_sasu_is
+from core.income import simuler_micro, simuler_eurl, simuler_sasu
 import json
 from pathlib import Path
 
