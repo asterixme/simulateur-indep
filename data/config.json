@@ -1,0 +1,127 @@
+{
+  "annee": 2026,
+
+  "impot_revenu": {
+    "tranches": [
+      { "jusqu_a": 11497,  "taux": 0.00 },
+      { "jusqu_a": 29315,  "taux": 0.11 },
+      { "jusqu_a": 83823,  "taux": 0.30 },
+      { "jusqu_a": 180294, "taux": 0.41 },
+      { "jusqu_a": null,   "taux": 0.45 }
+    ],
+    "parts_fiscales": {
+      "celibataire_sans_enfant": 1.0,
+      "celibataire_1_enfant":    1.5,
+      "celibataire_2_enfants":   2.0,
+      "celibataire_3_enfants":   3.0,
+      "marie_sans_enfant":       2.0,
+      "marie_1_enfant":          2.5,
+      "marie_2_enfants":         3.0,
+      "marie_3_enfants":         4.0
+    }
+  },
+
+  "impot_societes": {
+    "taux_reduit":       0.15,
+    "seuil_taux_reduit": 42500,
+    "taux_normal":       0.25,
+    "conditions_taux_reduit": {
+      "ca_ht_max":              10000000,
+      "capital_libere":         true,
+      "detention_personnes_physiques_min": 0.75
+    }
+  },
+
+  "flat_tax": {
+    "taux_global": 0.314,
+    "detail": {
+      "pfu_ir":    0.128,
+      "csg_crds":  0.172,
+      "prelevement_social": 0.014
+    }
+  },
+
+  "cotisations_tns": {
+    "taux_global_sur_net":        0.45,
+    "cout_total_pour_1000_net":   1450,
+    "minimum_annuel_sans_remuneration": 1160,
+    "seuil_dividendes_soumis_cotisations_pct": 0.10,
+    "description": "Gérant majoritaire EURL/SARL - SSI"
+  },
+
+  "cotisations_assimile_salarie": {
+    "taux_global_sur_net":      0.82,
+    "cout_total_pour_1000_net": 1820,
+    "minimum_annuel":           0,
+    "description": "Président SASU/SAS - Régime général"
+  },
+
+  "micro_entreprise": {
+    "plafond_ca_services_bnc":  83600,
+    "plafond_ca_services_bic":  83600,
+    "plafond_ca_commerce":      203100,
+    "abattements": {
+      "commerce": 0.71,
+      "services_bic": 0.50,
+      "services_bnc": 0.34
+    },
+    "taux_cotisations_sur_ca": {
+      "commerce":    0.123,
+      "services_bic": 0.214,
+      "services_bnc": 0.256
+    }
+  },
+
+  "retraite": {
+    "pass_2026":                    48060,
+    "salaire_brut_min_4_trimestres": 7212,
+    "salaire_brut_min_1_trimestre":  1803
+  },
+
+  "per": {
+    "plafond_deduction_tns_min": 4806,
+    "plafond_deduction_tns_max": 88911
+  },
+
+  "statuts": {
+    "micro": {
+      "label": "Micro-entreprise",
+      "regime_social": "TNS",
+      "regime_fiscal_defaut": "IR",
+      "option_is": false,
+      "dividendes": false,
+      "charges_deductibles": false,
+      "responsabilite": "Limitée (réforme 2022)",
+      "comptabilite": "Allégée",
+      "cout_creation": 0
+    },
+    "eurl": {
+      "label": "EURL",
+      "regime_social": "TNS",
+      "regime_fiscal_defaut": "IR",
+      "option_is": true,
+      "dividendes": true,
+      "dividendes_cotisations_tns": true,
+      "charges_deductibles": true,
+      "responsabilite": "Limitée aux apports",
+      "comptabilite": "Complète",
+      "cout_creation": 750,
+      "cout_expert_comptable_annuel_min": 800,
+      "cout_expert_comptable_annuel_max": 1500
+    },
+    "sasu": {
+      "label": "SASU",
+      "regime_social": "Assimilé salarié",
+      "regime_fiscal_defaut": "IS",
+      "option_is": true,
+      "dividendes": true,
+      "dividendes_cotisations_tns": false,
+      "charges_deductibles": true,
+      "responsabilite": "Limitée aux apports",
+      "comptabilite": "Complète + DSN mensuelle",
+      "cout_creation": 750,
+      "cout_expert_comptable_annuel_min": 1200,
+      "cout_expert_comptable_annuel_max": 2500
+    }
+  }
+}
