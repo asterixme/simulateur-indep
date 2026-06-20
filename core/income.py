@@ -1,324 +1,456 @@
 """
-income.py — Calcul du revenu net disponible pour chaque statut juridique
-Barèmes 2026 — avec détail mensuel salaire/dividendes et option IR/IS
+income.py — Calcul détaillé par statut juridique — Barèmes 2026
+Chaque fonction retourne un dict structuré en 4 groupes :
+  - entreprise   : CA, régime, IS
+  - salaire      : brut, cotisations, net, IR personnel
+  - dividendes   : bruts, flat tax, nets  (IS uniquement)
+  - tresorerie   : ce qui reste dans la boîte après tout
 """
 
 import json
 from pathlib import Path
 from core.tax import calculer_ir, calculer_is, calculer_flat_tax
 
-
 def _charger_config() -> dict:
     chemin = Path(__file__).parent.parent / "data" / "config.json"
     with open(chemin, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 CONFIG = _charger_config()
 
 
-def _detail_mensuel(salaire_brut_annuel: float, salaire_net_annuel: float,
-                    cotisations_annuelles: float, impot_revenu_annuel: float,
-                    dividendes_bruts_annuels: float, flat_tax_annuelle: float,
-                    dividendes_nets_annuels: float) -> dict:
-    """Génère le détail mensuel pour l'affichage."""
-    return {
-        "salaire_brut_mensuel":      round(salaire_brut_annuel / 12, 2),
-        "cotisations_mensuelles":    round(cotisations_annuelles / 12, 2),
-        "salaire_net_mensuel":       round(salaire_net_annuel / 12, 2),
-        "impot_revenu_mensuel":      round(impot_revenu_annuel / 12, 2),
-        "salaire_net_apres_ir":      round((salaire_net_annuel - impot_revenu_annuel) / 12, 2),
-        "dividendes_bruts_mensuel":  round(dividendes_bruts_annuels / 12, 2),
-        "flat_tax_mensuelle":        round(flat_tax_annuelle / 12, 2),
-        "dividendes_nets_mensuel":   round(dividendes_nets_annuels / 12, 2),
-        "revenu_total_mensuel":      round((salaire_net_annuel - impot_revenu_annuel + dividendes_nets_annuels) / 12, 2),
-    }
-
-
+# ─────────────────────────────────────────────────────────────────────────────
+# MICRO-ENTREPRISE
+# ─────────────────────────────────────────────────────────────────────────────
 def simuler_micro(ca: float, type_activite: str, nb_parts: float = 1.0) -> dict:
-    """Micro-entreprise — IR uniquement, pas d'IS possible."""
-    cfg_micro = CONFIG["micro_entreprise"]
-    plafond = cfg_micro[f"plafond_ca_{type_activite}"]
-    eligible = ca <= plafond
+    cfg   = CONFIG["micro_entreprise"]
+    plafond    = cfg[f"plafond_ca_{type_activite}"]
+    taux_abt   = cfg["abattements"][type_activite]
+    taux_coti  = cfg["taux_cotisations_sur_ca"][type_activite]
 
-    taux_abattement = cfg_micro["abattements"][type_activite]
-    revenu_imposable = ca * (1 - taux_abattement)
+    abattement      = round(ca * taux_abt, 2)
+    cotisations     = round(ca * taux_coti, 2)
+    revenu_imposable = round(ca * (1 - taux_abt), 2)
 
-    taux_coti = cfg_micro["taux_cotisations_sur_ca"][type_activite]
-    cotisations = ca * taux_coti
+    ir = calculer_ir(revenu_imposable, nb_parts)
+    montant_ir = ir["montant_ir"]
 
-    ir_result = calculer_ir(revenu_imposable, nb_parts)
-    montant_ir = ir_result["montant_ir"]
-
-    revenu_net = ca - cotisations - montant_ir
-
-    # En micro, le "salaire" = CA - cotisations (revenu avant IR)
-    revenu_avant_ir = ca - cotisations
-    detail = _detail_mensuel(
-        salaire_brut_annuel=ca,
-        salaire_net_annuel=revenu_avant_ir,
-        cotisations_annuelles=cotisations,
-        impot_revenu_annuel=montant_ir,
-        dividendes_bruts_annuels=0,
-        flat_tax_annuelle=0,
-        dividendes_nets_annuels=0,
-    )
+    # En micro : pas de société séparée → pas d'IS, pas de dividendes, pas de trésorerie
+    revenu_net = round(max(0, ca - cotisations - montant_ir), 2)
 
     return {
-        "statut": "Micro-entreprise",
-        "regime_fiscal": "IR",
-        "eligible": eligible,
-        "plafond_ca": plafond,
-        "ca": round(ca, 2),
-        "abattement_forfaitaire": round(ca * taux_abattement, 2),
-        "revenu_imposable": round(revenu_imposable, 2),
-        "cotisations_sociales": round(cotisations, 2),
-        "impot_revenu": round(montant_ir, 2),
-        "impot_societes": 0,
-        "flat_tax_dividendes": 0,
-        "dividendes_bruts": 0,
-        "dividendes_nets": 0,
-        "revenu_net_disponible": round(revenu_net, 2),
-        "tmi": ir_result["tmi"],
-        "taux_moyen_ir": ir_result["taux_moyen"],
-        "regime_social": "TNS (SSI)",
-        "mensuel": detail,
+        "statut"        : "Micro-entreprise",
+        "regime_fiscal" : "IR",
+        "regime_social" : "TNS (SSI)",
+        "eligible"      : ca <= plafond,
+        "plafond_ca"    : plafond,
+
+        # ── Groupe Entreprise ──────────────────────────────────────────────
+        "entreprise": {
+            "ca"                   : round(ca, 2),
+            "abattement_forfaitaire": abattement,
+            "taux_abattement"       : taux_abt,
+            "charges_deductibles"  : 0,
+            "regime_fiscal"        : "IR (barème progressif)",
+            "base_imposable_ir"    : revenu_imposable,
+            "impot_societes"       : 0,
+            "taux_is_effectif"     : 0,
+            "reste_apres_impots"   : revenu_imposable,   # pas d'IS, tout va au dirigeant
+        },
+
+        # ── Groupe Salaire / Rémunération ─────────────────────────────────
+        "salaire": {
+            "applicable"              : True,
+            "mode_ir"                 : True,   # pas de salaire distinct en micro
+            "remuneration_brute"      : round(ca - cotisations, 2),
+            "taux_cotisations"        : taux_coti,
+            "cotisations"             : cotisations,
+            "detail_cotisations"      : f"Cotisations TNS sur CA ({taux_coti*100:.1f}% × CA)",
+            "remuneration_nette"      : round(ca - cotisations, 2),
+            "ir_personnel"            : montant_ir,
+            "tmi"                     : ir["tmi"],
+            "taux_moyen_ir"           : ir["taux_moyen"],
+            "remuneration_nette_apres_ir": revenu_net,
+            "total_impots_boite_salaire": 0,   # pas de charges patronales distinctes
+        },
+
+        # ── Groupe Dividendes ─────────────────────────────────────────────
+        "dividendes": {
+            "applicable": False,
+            "raison"    : "Dividendes impossibles en micro-entreprise",
+        },
+
+        # ── Groupe Trésorerie ─────────────────────────────────────────────
+        "tresorerie": {
+            "applicable"     : False,
+            "raison"         : "Pas de société distincte en micro-entreprise",
+            "compte_boite"   : 0,
+        },
+
+        # ── Synthèse ──────────────────────────────────────────────────────
+        "synthese": {
+            "revenu_net_disponible" : revenu_net,
+            "total_impots_et_charges": round(cotisations + montant_ir, 2),
+            "tmi"                   : ir["tmi"],
+            "taux_moyen_ir"         : ir["taux_moyen"],
+            "trimestres_retraite"   : None,
+        },
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EURL
+# ─────────────────────────────────────────────────────────────────────────────
 def simuler_eurl(
     ca: float,
     charges_deductibles: float,
-    remuneration_dirigeant: float,
-    dividendes: float,
-    nb_parts: float = 1.0,
+    remuneration_net: float,      # salaire net souhaité (IS) ou ignoré (IR)
+    dividendes_bruts: float,
+    nb_parts: float       = 1.0,
     capital_social: float = 1000,
-    regime_fiscal: str = "IS",   # "IS" ou "IR"
+    regime_fiscal: str    = "IS",
 ) -> dict:
-    """
-    EURL — IS ou IR au choix.
-
-    En IR : le bénéfice est imposé directement au barème progressif (comme une EI).
-    En IS : taux 15%/25%, puis flat tax sur dividendes.
-    """
-    cfg_tns = CONFIG["cotisations_tns"]
-
-    # ── Cotisations TNS sur rémunération ──
-    cotisations_remuneration = remuneration_dirigeant * (cfg_tns["cout_total_pour_1000_net"] / 1000 - 1)
-    salaire_brut = remuneration_dirigeant + cotisations_remuneration  # coût total pour la société
+    cfg_tns     = CONFIG["cotisations_tns"]
+    taux_cout   = cfg_tns["cout_total_pour_1000_net"] / 1000   # ex: 1.45
+    taux_coti   = cfg_tns["taux_global_sur_net"]               # ex: 0.45
 
     if regime_fiscal == "IS":
-        # Seuil dividendes soumis à cotisations TNS (10% du capital social)
-        seuil_div_tns = capital_social * cfg_tns["seuil_dividendes_soumis_cotisations_pct"]
-        dividendes_soumis_tns = max(0, dividendes - seuil_div_tns)
-        cotisations_tns_div = dividendes_soumis_tns * (cfg_tns["cout_total_pour_1000_net"] / 1000 - 1)
-        total_cotisations = cotisations_remuneration + cotisations_tns_div
+        # ── Cotisations sur salaire ──────────────────────────────────────
+        cotisations_sal = round(remuneration_net * (taux_cout - 1), 2)
+        salaire_brut    = round(remuneration_net + cotisations_sal, 2)
 
-        benefice_imposable = ca - charges_deductibles - salaire_brut - cotisations_tns_div
-        benefice_apres_dividendes = max(0, benefice_imposable - dividendes)
+        # ── Cotisations TNS sur dividendes (si > 10% capital) ───────────
+        seuil_div_tns      = round(capital_social * cfg_tns["seuil_dividendes_soumis_cotisations_pct"], 2)
+        div_soumis_tns     = round(max(0, dividendes_bruts - seuil_div_tns), 2)
+        cotisations_div    = round(div_soumis_tns * (taux_cout - 1), 2)
+        total_cotisations  = round(cotisations_sal + cotisations_div, 2)
 
-        is_result = calculer_is(benefice_apres_dividendes)
-        montant_is = is_result["montant_is"]
+        # ── IS ───────────────────────────────────────────────────────────
+        # Bénéfice avant IS = CA - charges - salaire brut - coti div
+        benef_brut_is      = round(ca - charges_deductibles - salaire_brut - cotisations_div, 2)
+        benef_apres_div    = round(max(0, benef_brut_is - dividendes_bruts), 2)
+        is_res             = calculer_is(benef_apres_div)
+        montant_is         = is_res["montant_is"]
 
-        flat_tax_result = calculer_flat_tax(dividendes)
-        montant_flat_tax = flat_tax_result["montant_flat_tax"]
-        dividendes_nets = flat_tax_result["dividendes_nets"]
+        # ── Flat tax dividendes ──────────────────────────────────────────
+        ft                 = calculer_flat_tax(dividendes_bruts)
+        montant_ft         = ft["montant_flat_tax"]
+        dividendes_nets    = ft["dividendes_nets"]
+        taux_ft            = CONFIG["flat_tax"]["taux_global"]
 
-        ir_result = calculer_ir(remuneration_dirigeant, nb_parts)
-        montant_ir = ir_result["montant_ir"]
+        # ── IR personnel sur salaire uniquement ──────────────────────────
+        ir                 = calculer_ir(remuneration_net, nb_parts)
+        montant_ir         = ir["montant_ir"]
 
-        revenu_net = remuneration_dirigeant - montant_ir + dividendes_nets
+        # ── Trésorerie restante ──────────────────────────────────────────
+        # Boîte : ce qu'il reste après IS, dividendes bruts distribués
+        tresorerie         = round(max(0, benef_apres_div - montant_is), 2)
 
-        detail = _detail_mensuel(
-            salaire_brut_annuel=salaire_brut,
-            salaire_net_annuel=remuneration_dirigeant,
-            cotisations_annuelles=cotisations_remuneration,
-            impot_revenu_annuel=montant_ir,
-            dividendes_bruts_annuels=dividendes,
-            flat_tax_annuelle=montant_flat_tax,
-            dividendes_nets_annuels=dividendes_nets,
-        )
+        # ── Revenu net perso ─────────────────────────────────────────────
+        revenu_net         = round(max(0, remuneration_net - montant_ir + dividendes_nets), 2)
 
         return {
-            "statut": "EURL (IS)",
-            "regime_fiscal": "IS",
-            "eligible": True,
-            "ca": round(ca, 2),
-            "charges_deductibles": round(charges_deductibles, 2),
-            "salaire_brut_annuel": round(salaire_brut, 2),
-            "remuneration_nette_dirigeant": round(remuneration_dirigeant, 2),
-            "cotisations_tns_remuneration": round(cotisations_remuneration, 2),
-            "cotisations_tns_dividendes": round(cotisations_tns_div, 2),
-            "cotisations_sociales": round(total_cotisations, 2),
-            "benefice_imposable": round(max(0, benefice_imposable), 2),
-            "impot_societes": round(montant_is, 2),
-            "dividendes_bruts": round(dividendes, 2),
-            "flat_tax_dividendes": round(montant_flat_tax, 2),
-            "dividendes_nets": round(dividendes_nets, 2),
-            "impot_revenu": round(montant_ir, 2),
-            "revenu_net_disponible": round(revenu_net, 2),
-            "tmi": ir_result["tmi"],
-            "taux_moyen_ir": ir_result["taux_moyen"],
-            "regime_social": "TNS (SSI)",
-            "seuil_dividendes_tns": round(seuil_div_tns, 2),
-            "mensuel": detail,
+            "statut"        : "EURL (IS)",
+            "regime_fiscal" : "IS",
+            "regime_social" : "TNS (SSI)",
+            "eligible"      : True,
+
+            "entreprise": {
+                "ca"                    : round(ca, 2),
+                "charges_deductibles"   : round(charges_deductibles, 2),
+                "abattement_forfaitaire": 0,
+                "taux_abattement"       : 0,
+                "regime_fiscal"         : "IS (15% ≤ 42 500€ · 25% au-delà)",
+                "base_imposable_is"     : benef_apres_div,
+                "impot_societes"        : montant_is,
+                "taux_is_effectif"      : is_res["taux_effectif"],
+                "reste_apres_impots"    : round(benef_apres_div - montant_is, 2),
+            },
+
+            "salaire": {
+                "applicable"               : True,
+                "mode_ir"                  : False,
+                "salaire_net_saisi"        : round(remuneration_net, 2),
+                "taux_cotisations"         : taux_coti,
+                "cotisations"              : cotisations_sal,
+                "detail_cotisations"       : f"Cotisations TNS ({taux_coti*100:.0f}% du net)",
+                "salaire_brut"             : salaire_brut,
+                "ir_personnel"             : montant_ir,
+                "tmi"                      : ir["tmi"],
+                "taux_moyen_ir"            : ir["taux_moyen"],
+                "salaire_net_apres_ir"     : round(max(0, remuneration_net - montant_ir), 2),
+                "total_impots_boite_salaire": cotisations_sal,   # charges portées par la boîte
+            },
+
+            "dividendes": {
+                "applicable"           : True,
+                "dividendes_bruts"     : round(dividendes_bruts, 2),
+                "seuil_tns"            : seuil_div_tns,
+                "cotisations_tns_div"  : cotisations_div,
+                "detail_coti_div"      : f"Cotisations TNS sur part > {seuil_div_tns:,.0f}€ ({taux_coti*100:.0f}% du net)",
+                "taux_flat_tax"        : taux_ft,
+                "montant_flat_tax"     : montant_ft,
+                "detail_flat_tax"      : f"Flat tax {taux_ft*100:.1f}% (PFU 12,8% + prél. sociaux 17,2% + PS 1,4%)",
+                "dividendes_nets"      : dividendes_nets,
+                "total_impots_dividendes": round(montant_ft + cotisations_div, 2),
+            },
+
+            "tresorerie": {
+                "applicable"   : True,
+                "compte_boite" : tresorerie,
+                "detail"       : f"CA {ca:,.0f}€ − charges {charges_deductibles:,.0f}€ − salaire brut {salaire_brut:,.0f}€ − coti div {cotisations_div:,.0f}€ − dividendes {dividendes_bruts:,.0f}€ − IS {montant_is:,.0f}€",
+            },
+
+            "synthese": {
+                "revenu_net_disponible"  : revenu_net,
+                "total_impots_et_charges": round(total_cotisations + montant_is + montant_ft + montant_ir, 2),
+                "tmi"                    : ir["tmi"],
+                "taux_moyen_ir"          : ir["taux_moyen"],
+                "trimestres_retraite"    : None,
+            },
         }
 
     else:  # IR
-        # En EURL à l'IR, pas d'IS : le bénéfice entier est imposé au barème progressif
-        # Les dividendes ne sont pas possibles en IR (tout est bénéfice imposé à l'IR)
-        benefice = max(0, ca - charges_deductibles - salaire_brut)
-        # En IR, la rémunération = bénéfice (pas de séparation société/dirigeant)
-        revenu_imposable = benefice  # le gérant est imposé sur le bénéfice total
-        ir_result = calculer_ir(revenu_imposable, nb_parts)
-        montant_ir = ir_result["montant_ir"]
+        # En EURL à l'IR : tout le bénéfice (CA - charges - cotisations) est imposé à l'IR
+        # Les cotisations sont calculées sur le bénéfice (base TNS)
+        benef_avant_coti   = round(max(0, ca - charges_deductibles), 2)
+        # Approx cotisations : taux_coti × bénéfice avant cotisations / (1 + taux_coti)
+        cotisations_sal    = round(benef_avant_coti * taux_coti / (1 + taux_coti), 2)
+        benef_imposable    = round(max(0, benef_avant_coti - cotisations_sal), 2)
 
-        revenu_net = benefice - cotisations_remuneration - montant_ir
-
-        detail = _detail_mensuel(
-            salaire_brut_annuel=salaire_brut,
-            salaire_net_annuel=benefice,
-            cotisations_annuelles=cotisations_remuneration,
-            impot_revenu_annuel=montant_ir,
-            dividendes_bruts_annuels=0,
-            flat_tax_annuelle=0,
-            dividendes_nets_annuels=0,
-        )
+        ir                 = calculer_ir(benef_imposable, nb_parts)
+        montant_ir         = ir["montant_ir"]
+        revenu_net         = round(max(0, benef_imposable - montant_ir), 2)
 
         return {
-            "statut": "EURL (IR)",
-            "regime_fiscal": "IR",
-            "eligible": True,
-            "ca": round(ca, 2),
-            "charges_deductibles": round(charges_deductibles, 2),
-            "salaire_brut_annuel": round(salaire_brut, 2),
-            "remuneration_nette_dirigeant": round(remuneration_dirigeant, 2),
-            "cotisations_tns_remuneration": round(cotisations_remuneration, 2),
-            "cotisations_tns_dividendes": 0,
-            "cotisations_sociales": round(cotisations_remuneration, 2),
-            "benefice_imposable": round(benefice, 2),
-            "impot_societes": 0,
-            "dividendes_bruts": 0,
-            "flat_tax_dividendes": 0,
-            "dividendes_nets": 0,
-            "impot_revenu": round(montant_ir, 2),
-            "revenu_net_disponible": round(revenu_net, 2),
-            "tmi": ir_result["tmi"],
-            "taux_moyen_ir": ir_result["taux_moyen"],
-            "regime_social": "TNS (SSI)",
-            "mensuel": detail,
+            "statut"        : "EURL (IR)",
+            "regime_fiscal" : "IR",
+            "regime_social" : "TNS (SSI)",
+            "eligible"      : True,
+
+            "entreprise": {
+                "ca"                    : round(ca, 2),
+                "charges_deductibles"   : round(charges_deductibles, 2),
+                "abattement_forfaitaire": 0,
+                "taux_abattement"       : 0,
+                "regime_fiscal"         : "IR (barème progressif — tout le bénéfice imposé au dirigeant)",
+                "base_imposable_ir"     : benef_imposable,
+                "impot_societes"        : 0,
+                "taux_is_effectif"      : 0,
+                "reste_apres_impots"    : benef_imposable,
+            },
+
+            "salaire": {
+                "applicable"               : True,
+                "mode_ir"                  : True,
+                "remuneration_brute"       : benef_avant_coti,
+                "taux_cotisations"         : taux_coti,
+                "cotisations"              : cotisations_sal,
+                "detail_cotisations"       : f"Cotisations TNS (~{taux_coti*100:.0f}% du bénéfice)",
+                "remuneration_nette"       : benef_imposable,
+                "ir_personnel"             : montant_ir,
+                "tmi"                      : ir["tmi"],
+                "taux_moyen_ir"            : ir["taux_moyen"],
+                "remuneration_nette_apres_ir": revenu_net,
+                "total_impots_boite_salaire": cotisations_sal,
+            },
+
+            "dividendes": {
+                "applicable": False,
+                "raison"    : "Dividendes non disponibles à l'IR",
+            },
+
+            "tresorerie": {
+                "applicable"   : False,
+                "raison"       : "En IR, pas de bénéfice stocké en société — tout est imposé au dirigeant",
+                "compte_boite" : 0,
+            },
+
+            "synthese": {
+                "revenu_net_disponible"  : revenu_net,
+                "total_impots_et_charges": round(cotisations_sal + montant_ir, 2),
+                "tmi"                    : ir["tmi"],
+                "taux_moyen_ir"          : ir["taux_moyen"],
+                "trimestres_retraite"    : None,
+            },
         }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SASU
+# ─────────────────────────────────────────────────────────────────────────────
 def simuler_sasu(
     ca: float,
     charges_deductibles: float,
     salaire_net: float,
-    dividendes: float,
-    nb_parts: float = 1.0,
-    regime_fiscal: str = "IS",   # "IS" ou "IR"
+    dividendes_bruts: float,
+    nb_parts: float      = 1.0,
+    regime_fiscal: str   = "IS",
+    regime_social: str   = "assimile_salarie",
 ) -> dict:
-    """
-    SASU — IS par défaut, IR sur option (5 premiers exercices).
+    if regime_social == "tns":
+        cfg_rs    = CONFIG["cotisations_tns"]
+        label_rs  = "TNS (SSI)"
+        detail_rs = f"Cotisations TNS ({cfg_rs['taux_global_sur_net']*100:.0f}% du net)"
+    else:
+        cfg_rs    = CONFIG["cotisations_assimile_salarie"]
+        label_rs  = "Assimilé salarié (Régime général)"
+        detail_rs = f"Charges sociales assimilé salarié ({cfg_rs['taux_global_sur_net']*100:.0f}% du net)"
 
-    En IR : le bénéfice imposé directement au barème (rare mais possible).
-    En IS : taux 15%/25%, flat tax sur dividendes, pas de cotisations sur dividendes.
-    """
-    cfg_salarie = CONFIG["cotisations_assimile_salarie"]
-
-    cotisations_salaire = salaire_net * (cfg_salarie["cout_total_pour_1000_net"] / 1000 - 1)
-    salaire_brut = salaire_net + cotisations_salaire
-
-    # Trimestres retraite validés
-    pass_trimestre = CONFIG["retraite"]["salaire_brut_min_1_trimestre"]
-    trimestres_valides = min(4, int(salaire_brut / pass_trimestre))
+    taux_cout  = cfg_rs["cout_total_pour_1000_net"] / 1000
+    taux_coti  = cfg_rs["taux_global_sur_net"]
 
     if regime_fiscal == "IS":
-        benefice_imposable = ca - charges_deductibles - salaire_brut
-        benefice_apres_dividendes = max(0, benefice_imposable - dividendes)
+        cotisations   = round(salaire_net * (taux_cout - 1), 2)
+        salaire_brut  = round(salaire_net + cotisations, 2)
 
-        is_result = calculer_is(benefice_apres_dividendes)
-        montant_is = is_result["montant_is"]
+        # Trimestres retraite
+        pass_trim    = CONFIG["retraite"]["salaire_brut_min_1_trimestre"]
+        trimestres   = min(4, int(salaire_brut / pass_trim)) if salaire_brut > 0 else 0
 
-        flat_tax_result = calculer_flat_tax(dividendes)
-        montant_flat_tax = flat_tax_result["montant_flat_tax"]
-        dividendes_nets = flat_tax_result["dividendes_nets"]
+        # IS
+        benef_brut_is  = round(ca - charges_deductibles - salaire_brut, 2)
+        benef_apres_div = round(max(0, benef_brut_is - dividendes_bruts), 2)
+        is_res         = calculer_is(benef_apres_div)
+        montant_is     = is_res["montant_is"]
 
-        ir_result = calculer_ir(salaire_net, nb_parts)
-        montant_ir = ir_result["montant_ir"]
+        # Flat tax dividendes (pas de cotisations sociales sur dividendes en SASU ✅)
+        ft             = calculer_flat_tax(dividendes_bruts)
+        montant_ft     = ft["montant_flat_tax"]
+        dividendes_nets = ft["dividendes_nets"]
+        taux_ft        = CONFIG["flat_tax"]["taux_global"]
 
-        revenu_net = salaire_net - montant_ir + dividendes_nets
+        # IR personnel sur salaire seul
+        ir             = calculer_ir(salaire_net, nb_parts)
+        montant_ir     = ir["montant_ir"]
 
-        detail = _detail_mensuel(
-            salaire_brut_annuel=salaire_brut,
-            salaire_net_annuel=salaire_net,
-            cotisations_annuelles=cotisations_salaire,
-            impot_revenu_annuel=montant_ir,
-            dividendes_bruts_annuels=dividendes,
-            flat_tax_annuelle=montant_flat_tax,
-            dividendes_nets_annuels=dividendes_nets,
-        )
+        tresorerie     = round(max(0, benef_apres_div - montant_is), 2)
+        revenu_net     = round(max(0, salaire_net - montant_ir + dividendes_nets), 2)
 
         return {
-            "statut": "SASU (IS)",
-            "regime_fiscal": "IS",
-            "eligible": True,
-            "ca": round(ca, 2),
-            "charges_deductibles": round(charges_deductibles, 2),
-            "salaire_brut_annuel": round(salaire_brut, 2),
-            "salaire_net_president": round(salaire_net, 2),
-            "cotisations_assimile_salarie": round(cotisations_salaire, 2),
-            "cotisations_sociales": round(cotisations_salaire, 2),
-            "benefice_imposable": round(max(0, benefice_imposable), 2),
-            "impot_societes": round(montant_is, 2),
-            "dividendes_bruts": round(dividendes, 2),
-            "flat_tax_dividendes": round(montant_flat_tax, 2),
-            "dividendes_nets": round(dividendes_nets, 2),
-            "impot_revenu": round(montant_ir, 2),
-            "revenu_net_disponible": round(revenu_net, 2),
-            "tmi": ir_result["tmi"],
-            "taux_moyen_ir": ir_result["taux_moyen"],
-            "regime_social": "Assimilé salarié (Régime général)",
-            "trimestres_retraite_valides": trimestres_valides,
-            "mensuel": detail,
+            "statut"        : "SASU (IS)",
+            "regime_fiscal" : "IS",
+            "regime_social" : label_rs,
+            "regime_social_key": regime_social,
+            "eligible"      : True,
+
+            "entreprise": {
+                "ca"                    : round(ca, 2),
+                "charges_deductibles"   : round(charges_deductibles, 2),
+                "abattement_forfaitaire": 0,
+                "taux_abattement"       : 0,
+                "regime_fiscal"         : "IS (15% ≤ 42 500€ · 25% au-delà)",
+                "base_imposable_is"     : benef_apres_div,
+                "impot_societes"        : montant_is,
+                "taux_is_effectif"      : is_res["taux_effectif"],
+                "reste_apres_impots"    : round(benef_apres_div - montant_is, 2),
+            },
+
+            "salaire": {
+                "applicable"               : True,
+                "mode_ir"                  : False,
+                "salaire_net_saisi"        : round(salaire_net, 2),
+                "taux_cotisations"         : taux_coti,
+                "cotisations"              : cotisations,
+                "detail_cotisations"       : detail_rs,
+                "salaire_brut"             : salaire_brut,
+                "ir_personnel"             : montant_ir,
+                "tmi"                      : ir["tmi"],
+                "taux_moyen_ir"            : ir["taux_moyen"],
+                "salaire_net_apres_ir"     : round(max(0, salaire_net - montant_ir), 2),
+                "total_impots_boite_salaire": cotisations,
+            },
+
+            "dividendes": {
+                "applicable"             : True,
+                "dividendes_bruts"       : round(dividendes_bruts, 2),
+                "seuil_tns"              : 0,
+                "cotisations_tns_div"    : 0,
+                "detail_coti_div"        : "Pas de cotisations sociales sur dividendes en SASU ✅",
+                "taux_flat_tax"          : taux_ft,
+                "montant_flat_tax"       : montant_ft,
+                "detail_flat_tax"        : f"Flat tax {taux_ft*100:.1f}% (PFU 12,8% + prél. sociaux 17,2% + PS 1,4%)",
+                "dividendes_nets"        : dividendes_nets,
+                "total_impots_dividendes": montant_ft,
+            },
+
+            "tresorerie": {
+                "applicable"   : True,
+                "compte_boite" : tresorerie,
+                "detail"       : f"CA {ca:,.0f}€ − charges {charges_deductibles:,.0f}€ − salaire brut {salaire_brut:,.0f}€ − dividendes {dividendes_bruts:,.0f}€ − IS {montant_is:,.0f}€",
+            },
+
+            "synthese": {
+                "revenu_net_disponible"  : revenu_net,
+                "total_impots_et_charges": round(cotisations + montant_is + montant_ft + montant_ir, 2),
+                "tmi"                    : ir["tmi"],
+                "taux_moyen_ir"          : ir["taux_moyen"],
+                "trimestres_retraite"    : trimestres,
+            },
         }
 
-    else:  # IR (option rare, 5 premiers exercices)
-        benefice = max(0, ca - charges_deductibles - salaire_brut)
-        ir_result = calculer_ir(benefice, nb_parts)
-        montant_ir = ir_result["montant_ir"]
-        revenu_net = benefice - cotisations_salaire - montant_ir
+    else:  # IR
+        benef_avant_coti = round(max(0, ca - charges_deductibles), 2)
+        cotisations      = round(benef_avant_coti * taux_coti / (1 + taux_coti), 2)
+        benef_imposable  = round(max(0, benef_avant_coti - cotisations), 2)
 
-        detail = _detail_mensuel(
-            salaire_brut_annuel=salaire_brut,
-            salaire_net_annuel=benefice,
-            cotisations_annuelles=cotisations_salaire,
-            impot_revenu_annuel=montant_ir,
-            dividendes_bruts_annuels=0,
-            flat_tax_annuelle=0,
-            dividendes_nets_annuels=0,
-        )
+        pass_trim  = CONFIG["retraite"]["salaire_brut_min_1_trimestre"]
+        trimestres = min(4, int(benef_avant_coti / pass_trim)) if benef_avant_coti > 0 else 0
+
+        ir         = calculer_ir(benef_imposable, nb_parts)
+        montant_ir = ir["montant_ir"]
+        revenu_net = round(max(0, benef_imposable - montant_ir), 2)
 
         return {
-            "statut": "SASU (IR)",
-            "regime_fiscal": "IR",
-            "eligible": True,
-            "ca": round(ca, 2),
-            "charges_deductibles": round(charges_deductibles, 2),
-            "salaire_brut_annuel": round(salaire_brut, 2),
-            "salaire_net_president": round(salaire_net, 2),
-            "cotisations_assimile_salarie": round(cotisations_salaire, 2),
-            "cotisations_sociales": round(cotisations_salaire, 2),
-            "benefice_imposable": round(benefice, 2),
-            "impot_societes": 0,
-            "dividendes_bruts": 0,
-            "flat_tax_dividendes": 0,
-            "dividendes_nets": 0,
-            "impot_revenu": round(montant_ir, 2),
-            "revenu_net_disponible": round(revenu_net, 2),
-            "tmi": ir_result["tmi"],
-            "taux_moyen_ir": ir_result["taux_moyen"],
-            "regime_social": "Assimilé salarié (Régime général)",
-            "trimestres_retraite_valides": trimestres_valides,
-            "mensuel": detail,
+            "statut"        : "SASU (IR)",
+            "regime_fiscal" : "IR",
+            "regime_social" : label_rs,
+            "regime_social_key": regime_social,
+            "eligible"      : True,
+
+            "entreprise": {
+                "ca"                    : round(ca, 2),
+                "charges_deductibles"   : round(charges_deductibles, 2),
+                "abattement_forfaitaire": 0,
+                "taux_abattement"       : 0,
+                "regime_fiscal"         : "IR (barème progressif — tout le bénéfice imposé au dirigeant)",
+                "base_imposable_ir"     : benef_imposable,
+                "impot_societes"        : 0,
+                "taux_is_effectif"      : 0,
+                "reste_apres_impots"    : benef_imposable,
+            },
+
+            "salaire": {
+                "applicable"               : True,
+                "mode_ir"                  : True,
+                "remuneration_brute"       : benef_avant_coti,
+                "taux_cotisations"         : taux_coti,
+                "cotisations"              : cotisations,
+                "detail_cotisations"       : detail_rs,
+                "remuneration_nette"       : benef_imposable,
+                "ir_personnel"             : montant_ir,
+                "tmi"                      : ir["tmi"],
+                "taux_moyen_ir"            : ir["taux_moyen"],
+                "remuneration_nette_apres_ir": revenu_net,
+                "total_impots_boite_salaire": cotisations,
+            },
+
+            "dividendes": {
+                "applicable": False,
+                "raison"    : "Dividendes non disponibles à l'IR",
+            },
+
+            "tresorerie": {
+                "applicable"   : False,
+                "raison"       : "En IR, pas de bénéfice stocké en société — tout est imposé au dirigeant",
+                "compte_boite" : 0,
+            },
+
+            "synthese": {
+                "revenu_net_disponible"  : revenu_net,
+                "total_impots_et_charges": round(cotisations + montant_ir, 2),
+                "tmi"                    : ir["tmi"],
+                "taux_moyen_ir"          : ir["taux_moyen"],
+                "trimestres_retraite"    : trimestres,
+            },
         }

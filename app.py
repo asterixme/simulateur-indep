@@ -1,372 +1,345 @@
 """
 app.py — Simulateur de statut juridique 2026
-Interface Streamlit avec paramétrage IS/IR, salaire et dividendes ajustables en temps réel.
 """
-
-import streamlit as st
-import sys
+import streamlit as st, sys, pandas as pd
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent))
-
 from core.income import simuler_micro, simuler_eurl, simuler_sasu
-from core.optimization import comparer_statuts, optimiser_remuneration_eurl, optimiser_remuneration_sasu
 from core.tax import _charger_config
 
 CONFIG = _charger_config()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Simulateur Statut Juridique 2026",
-    page_icon="⚖️",
-    layout="wide",
-)
+st.set_page_config(page_title="Simulateur Statut Juridique 2026", page_icon="⚖️", layout="wide")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER : affichage d'une ligne de détail
+# ─────────────────────────────────────────────────────────────────────────────
+def ligne(label: str, valeur, note: str = "", negatif: bool = False, gras: bool = False):
+    val_str = f"{valeur:,.0f} €" if isinstance(valeur, (int, float)) else str(valeur)
+    if negatif and isinstance(valeur, (int, float)):
+        val_str = f"− {valeur:,.0f} €"
+    style = "**" if gras else ""
+    note_str = f"  \n  <small style='color:grey'>{note}</small>" if note else ""
+    st.markdown(f"{style}{label}{style} : {style}{val_str}{style}{note_str}", unsafe_allow_html=True)
+
+def separateur():
+    st.markdown("<hr style='margin:6px 0; border-color:#eee'>", unsafe_allow_html=True)
+
+def titre_groupe(emoji: str, label: str):
+    st.markdown(f"##### {emoji} {label}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER : bloc complet d'un statut
+# ─────────────────────────────────────────────────────────────────────────────
+def afficher_statut(res: dict):
+    rf   = res["regime_fiscal"]
+    is_mode = (rf == "IS")
+    ent  = res["entreprise"]
+    sal  = res["salaire"]
+    div  = res["dividendes"]
+    tre  = res["tresorerie"]
+    syn  = res["synthese"]
+
+    # ── Revenus entreprise ────────────────────────────────────────────────
+    with st.expander("🏢 Revenus entreprise", expanded=True):
+        ligne("CA", ent["ca"])
+        if ent.get("charges_deductibles", 0):
+            ligne("Charges déductibles", ent["charges_deductibles"], negatif=True)
+        if ent.get("abattement_forfaitaire", 0):
+            ligne("Abattement forfaitaire",
+                  ent["abattement_forfaitaire"], negatif=True,
+                  note=f"{ent['taux_abattement']*100:.0f}% du CA — remplace les charges réelles")
+        ligne("Choix régime", ent["regime_fiscal"])
+        separateur()
+        if is_mode:
+            ligne("Base imposable IS", ent.get("base_imposable_is", 0))
+            ligne("Impôt sur les sociétés (IS)",
+                  ent["impot_societes"], negatif=True,
+                  note=f"Taux effectif {ent['taux_is_effectif']:.1f}% (15% ≤ 42 500€ · 25% au-delà)", gras=True)
+            ligne("Reste après IS", ent["reste_apres_impots"], gras=True)
+        else:
+            ligne("Base imposable IR", ent.get("base_imposable_ir", 0))
+            st.caption("En IR, pas d'IS — le bénéfice est imposé directement à l'IR du dirigeant.")
+
+    # ── Salaire / Rémunération ────────────────────────────────────────────
+    with st.expander("💼 Salaire / Rémunération", expanded=True):
+        if sal.get("mode_ir"):
+            # IR : pas de salaire distinct
+            ligne("Bénéfice brut (avant cotisations)", sal.get("remuneration_brute", 0))
+            ligne("Cotisations sociales",
+                  sal["cotisations"], negatif=True,
+                  note=sal["detail_cotisations"], gras=True)
+            ligne("Bénéfice net (= rémunération disponible)",
+                  sal.get("remuneration_nette", 0) or sal.get("remuneration_nette_apres_ir", 0) + sal["ir_personnel"],
+                  gras=True)
+            separateur()
+            ligne("IR personnel (sur ce bénéfice)",
+                  sal["ir_personnel"], negatif=True,
+                  note=f"TMI {sal['tmi']}% · taux moyen {sal['taux_moyen_ir']}%", gras=True)
+            ligne("Rémunération nette après IR", sal.get("remuneration_nette_apres_ir", 0), gras=True)
+        else:
+            # IS : salaire brut/net clairement séparés
+            ligne("Salaire net versé", sal["salaire_net_saisi"])
+            ligne("Cotisations sociales",
+                  sal["cotisations"], negatif=True,
+                  note=sal["detail_cotisations"], gras=True)
+            ligne("Salaire brut (coût total pour la boîte)",
+                  sal["salaire_brut"],
+                  note="= salaire net + cotisations — c'est ce que la boîte paye réellement")
+            separateur()
+            ligne("IR personnel (sur salaire net)",
+                  sal["ir_personnel"], negatif=True,
+                  note=f"TMI {sal['tmi']}% · taux moyen {sal['taux_moyen_ir']}%", gras=True)
+            ligne("Salaire net après IR personnel", sal["salaire_net_apres_ir"], gras=True)
+            separateur()
+            ligne("Total charges payées par la boîte pour ce salaire",
+                  sal["total_impots_boite_salaire"], negatif=True,
+                  note="= cotisations sociales uniquement (l'IR est payé par le dirigeant)")
+
+        if syn.get("trimestres_retraite") is not None:
+            t = syn["trimestres_retraite"]
+            ic = "🟢" if t == 4 else ("🟡" if t >= 2 else "🔴")
+            st.markdown(f"**Trimestres retraite validés** : {ic} {t}/4")
+
+    # ── Dividendes ────────────────────────────────────────────────────────
+    if div["applicable"]:
+        with st.expander("📈 Dividendes", expanded=True):
+            ligne("Dividendes bruts versés", div["dividendes_bruts"])
+            if div.get("cotisations_tns_div", 0) > 0:
+                ligne("Cotisations TNS sur dividendes",
+                      div["cotisations_tns_div"], negatif=True,
+                      note=div["detail_coti_div"], gras=True)
+            else:
+                st.caption(f"ℹ️ {div.get('detail_coti_div','')}")
+            ligne("Flat tax (PFU)",
+                  div["montant_flat_tax"], negatif=True,
+                  note=div["detail_flat_tax"], gras=True)
+            ligne("Dividendes nets reçus", div["dividendes_nets"], gras=True)
+            separateur()
+            ligne("Total impôts sur dividendes", div["total_impots_dividendes"],
+                  note="Flat tax + éventuelles cotisations TNS")
+    elif not div["applicable"] and is_mode is False:
+        with st.expander("📈 Dividendes", expanded=False):
+            st.caption(f"⚠️ {div.get('raison', '')}")
+
+    # ── Trésorerie ────────────────────────────────────────────────────────
+    with st.expander("🏦 Trésorerie (compte de la boîte)", expanded=True):
+        if tre["applicable"]:
+            ligne("Solde restant dans la société", tre["compte_boite"], gras=True)
+            st.caption(tre.get("detail", ""))
+            st.caption("Ce montant est disponible en trésorerie : investissement, épargne entreprise, ou future distribution.")
+        else:
+            st.caption(f"⚠️ {tre.get('raison', '')}")
+
+    # ── Résumé ────────────────────────────────────────────────────────────
+    separateur()
+    st.metric("💰 Total en poche (net/an)", f"{syn['revenu_net_disponible']:,.0f} €")
+    st.metric("📅 Total en poche (net/mois)", f"{syn['revenu_net_disponible']/12:,.0f} €")
+    if tre["applicable"] and tre["compte_boite"] > 0:
+        st.metric("🏦 + Trésorerie boîte", f"{tre['compte_boite']:,.0f} €")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 1 — PARAMÈTRES
+# ═════════════════════════════════════════════════════════════════════════════
 st.title("⚖️ Simulateur de statut juridique 2026")
 st.caption("Compare Micro-entreprise, EURL et SASU · Barèmes fiscaux et sociaux 2026")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 1 — PARAMÈTRES DE LA SIMULATION
-# ─────────────────────────────────────────────────────────────────────────────
 with st.container(border=True):
     st.subheader("① Paramètres de la simulation")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        ca = st.number_input(
-            "Chiffre d'affaires annuel HT (€)",
-            min_value=0, max_value=2_000_000, value=80_000, step=1_000,
-            help="Votre CA prévisionnel ou réel sur 12 mois",
-        )
-        type_activite = st.selectbox(
-            "Type d'activité",
-            options=["services_bnc", "services_bic", "commerce"],
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        ca = st.number_input("Chiffre d'affaires annuel HT (€)", 0, 2_000_000, 80_000, 1_000)
+        type_activite = st.selectbox("Type d'activité",
+            ["services_bnc", "services_bic", "commerce"],
             format_func=lambda x: {
-                "services_bnc": "Prestations de services (BNC) — libéral, consultant…",
-                "services_bic": "Prestations de services (BIC) — artisan, agence…",
-                "commerce":     "Commerce / vente de biens",
-            }[x],
-        )
-
-    with col2:
-        charges_reelles = st.number_input(
-            "Charges professionnelles réelles (€/an)",
-            min_value=0, max_value=500_000, value=5_000, step=500,
-            help="Loyer, matériel, logiciels, expert-comptable, déplacements… hors rémunération",
-        )
-        situation_familiale = st.selectbox(
-            "Situation familiale",
-            options=[
-                "celibataire_sans_enfant", "celibataire_1_enfant", "celibataire_2_enfants", "celibataire_3_enfants",
-                "marie_sans_enfant",       "marie_1_enfant",       "marie_2_enfants",       "marie_3_enfants",
-            ],
+                "services_bnc": "Prestations BNC — libéral, consultant…",
+                "services_bic": "Prestations BIC — artisan, agence…",
+                "commerce"    : "Commerce / vente de biens"}[x])
+    with c2:
+        charges_reelles = st.number_input("Charges pro réelles (€/an)", 0, 500_000, 5_000, 500,
+            help="Loyer, matériel, logiciels, expert-comptable… hors rémunération")
+        situation_familiale = st.selectbox("Situation familiale",
+            ["celibataire_sans_enfant","celibataire_1_enfant","celibataire_2_enfants","celibataire_3_enfants",
+             "marie_sans_enfant","marie_1_enfant","marie_2_enfants","marie_3_enfants"],
             format_func=lambda x: {
-                "celibataire_sans_enfant": "Célibataire — sans enfant",
-                "celibataire_1_enfant":    "Célibataire — 1 enfant",
-                "celibataire_2_enfants":   "Célibataire — 2 enfants",
-                "celibataire_3_enfants":   "Célibataire — 3 enfants",
-                "marie_sans_enfant":       "Marié(e)/Pacsé(e) — sans enfant",
-                "marie_1_enfant":          "Marié(e)/Pacsé(e) — 1 enfant",
-                "marie_2_enfants":         "Marié(e)/Pacsé(e) — 2 enfants",
-                "marie_3_enfants":         "Marié(e)/Pacsé(e) — 3 enfants",
-            }[x],
-        )
+                "celibataire_sans_enfant":"Célibataire — sans enfant",
+                "celibataire_1_enfant"  :"Célibataire — 1 enfant",
+                "celibataire_2_enfants" :"Célibataire — 2 enfants",
+                "celibataire_3_enfants" :"Célibataire — 3 enfants",
+                "marie_sans_enfant"     :"Marié(e)/Pacsé(e) — sans enfant",
+                "marie_1_enfant"        :"Marié(e)/Pacsé(e) — 1 enfant",
+                "marie_2_enfants"       :"Marié(e)/Pacsé(e) — 2 enfants",
+                "marie_3_enfants"       :"Marié(e)/Pacsé(e) — 3 enfants"}[x])
+    with c3:
+        capital_social = st.number_input("Capital social EURL/SASU (€)", 1, 100_000, 1_000, 100,
+            help="Seuil dividendes EURL soumis aux cotisations TNS = 10% du capital")
 
-    with col3:
-        capital_social = st.number_input(
-            "Capital social EURL/SASU (€)",
-            min_value=1, max_value=100_000, value=1_000, step=100,
-            help="Sert au calcul du seuil de dividendes soumis aux cotisations TNS en EURL (10% du capital)",
-        )
-        situation_are = st.checkbox(
-            "Je bénéficie de l'ARE (allocations chômage)",
-            value=False,
-        )
+nb_parts   = CONFIG["impot_revenu"]["parts_fiscales"][situation_familiale]
+benef_brut = max(0, ca - charges_reelles)
+cfg_micro  = CONFIG["micro_entreprise"]
+plafond    = cfg_micro[f"plafond_ca_{type_activite}"]
 
-nb_parts = CONFIG["impot_revenu"]["parts_fiscales"][situation_familiale]
-benefice_brut = max(0, ca - charges_reelles)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CALCUL DES OPTIMA PAR DÉFAUT (pour initialiser les sliders)
-# ─────────────────────────────────────────────────────────────────────────────
-def _valeurs_defaut_eurl_is():
-    seuil_div = capital_social * 0.10
-    rem = benefice_brut * 0.5
-    div = min(seuil_div, benefice_brut * 0.3)
-    return round(rem), round(div)
-
-def _valeurs_defaut_sasu_is():
-    sal_brut_min = CONFIG["retraite"]["salaire_brut_min_4_trimestres"]
-    sal_net_min = round(sal_brut_min / 1.82)
-    cout_sal = sal_net_min * 1.82
-    dispo = benefice_brut - cout_sal
-    div = round(max(0, dispo) * 0.7)
-    return sal_net_min, div
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 2 — LES TROIS STATUTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 2 — RÉSULTATS PAR STATUT
+# ═════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("② Résultats par statut — ajustez les paramètres en temps réel")
+st.subheader("② Résultats par statut")
 
 col_micro, col_eurl, col_sasu = st.columns(3)
 
-# ── MICRO ────────────────────────────────────────────────────────────────────
+# ── MICRO ─────────────────────────────────────────────────────────────────
 with col_micro:
     with st.container(border=True):
         st.markdown("### 🟦 Micro-entreprise")
-        st.caption("Régime IR uniquement · Pas de dividendes")
+        st.caption("IR · TNS · Pas de dividendes")
 
-        cfg_micro = CONFIG["micro_entreprise"]
-        plafond = cfg_micro[f"plafond_ca_{type_activite}"]
-        eligible_micro = ca <= plafond
-
-        if not eligible_micro:
+        if ca > plafond:
             st.error(f"❌ Non éligible — CA ({ca:,.0f}€) > plafond ({plafond:,.0f}€)")
-            res_micro = {"revenu_net_disponible": 0, "eligible": False}
+            res_micro = None
         else:
             res_micro = simuler_micro(ca, type_activite, nb_parts)
-            st.metric("💰 Revenu net disponible", f"{res_micro['revenu_net_disponible']:,.0f} €/an")
-            st.metric("📅 Soit par mois", f"{res_micro['mensuel']['revenu_total_mensuel']:,.0f} €/mois")
-            st.divider()
-            st.markdown(f"**Régime fiscal** : IR")
-            st.markdown(f"**Régime social** : TNS (SSI)")
-            abt = cfg_micro['abattements'][type_activite]
-            st.markdown(f"**Abattement forfaitaire** : {abt*100:.0f}% → {res_micro['abattement_forfaitaire']:,.0f} €")
-            st.markdown(f"**Cotisations sociales** : {res_micro['cotisations_sociales']:,.0f} €")
-            st.markdown(f"**Impôt sur le revenu** : {res_micro['impot_revenu']:,.0f} €")
-            st.markdown(f"**TMI** : {res_micro['tmi']}%  ·  Taux moyen IR : {res_micro['taux_moyen_ir']}%")
-            st.markdown(f"**Dividendes** : ❌ non disponibles")
+            afficher_statut(res_micro)
 
-# ── EURL ─────────────────────────────────────────────────────────────────────
+# ── EURL ──────────────────────────────────────────────────────────────────
 with col_eurl:
     with st.container(border=True):
         st.markdown("### 🟨 EURL")
         st.caption("IS ou IR · TNS (SSI) · Dividendes possibles à l'IS")
 
-        eurl_regime = st.radio(
-            "Régime fiscal",
-            options=["IS (recommandé si bénéfice > 30k€)", "IR (si faibles revenus)"],
-            key="eurl_regime",
-            horizontal=True,
-        )
-        eurl_is = eurl_regime.startswith("IS")
+        st.info("👷 Régime social : **TNS (SSI)** — obligatoire pour le gérant majoritaire d'EURL")
+        eurl_rf = st.radio("Régime fiscal", ["IS", "IR"], key="eurl_rf", horizontal=True)
+        eurl_is = (eurl_rf == "IS")
 
         if eurl_is:
-            def_rem_eurl, def_div_eurl = _valeurs_defaut_eurl_is()
+            seuil_div = round(capital_social * 0.10)
+            cfg_tns   = CONFIG["cotisations_tns"]
+            taux_cout_tns = cfg_tns["cout_total_pour_1000_net"] / 1000
+
             rem_eurl = st.slider(
-                "Rémunération nette dirigeant (€/an)",
-                min_value=0, max_value=int(benefice_brut) if benefice_brut > 0 else 1,
-                value=min(def_rem_eurl, int(benefice_brut)),
-                step=500, key="rem_eurl",
-                help="Votre salaire net TNS annuel",
-            )
-            seuil_div_eurl = round(capital_social * 0.10)
-            div_max_eurl = max(0, int(benefice_brut - rem_eurl))
+                "Salaire net dirigeant (€/an)",
+                0, max(1, int(benef_brut)),
+                min(round(benef_brut * 0.5), int(benef_brut)), 500, key="rem_eurl",
+                help="Vous saisissez le NET. Le brut (net + cotisations TNS ~45%) est calculé automatiquement.")
+            cout_sal_eurl = rem_eurl * taux_cout_tns
+            div_max_eurl  = max(0, int(benef_brut - cout_sal_eurl))
             div_eurl = st.slider(
-                f"Dividendes bruts (€/an) · Seuil TNS : {seuil_div_eurl:,}€",
-                min_value=0, max_value=div_max_eurl,
-                value=min(def_div_eurl, div_max_eurl),
-                step=500, key="div_eurl",
-                help=f"Au-delà de {seuil_div_eurl:,}€ (10% du capital), les dividendes supportent des cotisations TNS",
-            )
+                f"Dividendes bruts (€/an) — seuil TNS : {seuil_div:,} €",
+                0, max(1, div_max_eurl),
+                min(seuil_div, div_max_eurl), 500, key="div_eurl",
+                help=f"Au-delà de {seuil_div:,}€ (10% capital), cotisations TNS supplémentaires")
             res_eurl = simuler_eurl(ca, charges_reelles, rem_eurl, div_eurl, nb_parts, capital_social, "IS")
         else:
-            rem_eurl_ir = st.slider(
-                "Rémunération nette dirigeant (€/an)",
-                min_value=0, max_value=int(benefice_brut) if benefice_brut > 0 else 1,
-                value=min(int(benefice_brut * 0.7), int(benefice_brut)),
-                step=500, key="rem_eurl_ir",
-            )
-            res_eurl = simuler_eurl(ca, charges_reelles, rem_eurl_ir, 0, nb_parts, capital_social, "IR")
+            st.caption("ℹ️ En IR, le dirigeant est imposé sur tout le bénéfice — pas de slider salaire ni dividendes.")
+            res_eurl = simuler_eurl(ca, charges_reelles, 0, 0, nb_parts, capital_social, "IR")
 
-        st.divider()
-        st.metric("💰 Revenu net disponible", f"{res_eurl['revenu_net_disponible']:,.0f} €/an")
-        st.metric("📅 Soit par mois", f"{res_eurl['mensuel']['revenu_total_mensuel']:,.0f} €/mois")
-        st.divider()
-        st.markdown(f"**Régime fiscal** : {res_eurl['regime_fiscal']}")
-        st.markdown(f"**Régime social** : {res_eurl['regime_social']}")
-        st.markdown(f"**Cotisations TNS (rémun.)** : {res_eurl['cotisations_tns_remuneration']:,.0f} €")
-        if eurl_is:
-            st.markdown(f"**Cotisations TNS (divid.)** : {res_eurl['cotisations_tns_dividendes']:,.0f} €")
-            st.markdown(f"**Bénéfice imposable IS** : {res_eurl['benefice_imposable']:,.0f} €")
-            st.markdown(f"**Impôt sur les sociétés** : {res_eurl['impot_societes']:,.0f} €")
-            st.markdown(f"**Flat tax dividendes** : {res_eurl['flat_tax_dividendes']:,.0f} €")
-            st.markdown(f"**Dividendes nets** : {res_eurl['dividendes_nets']:,.0f} €")
-        st.markdown(f"**Impôt sur le revenu** : {res_eurl['impot_revenu']:,.0f} €")
-        st.markdown(f"**TMI** : {res_eurl['tmi']}%  ·  Taux moyen IR : {res_eurl['taux_moyen_ir']}%")
+        afficher_statut(res_eurl)
 
-# ── SASU ─────────────────────────────────────────────────────────────────────
+# ── SASU ──────────────────────────────────────────────────────────────────
 with col_sasu:
     with st.container(border=True):
         st.markdown("### 🟩 SASU")
-        st.caption("IS par défaut · Assimilé salarié · Dividendes sans cotisations sociales")
+        st.caption("IS par défaut · Régime social au choix · Dividendes sans cotisations sociales")
 
-        sasu_regime = st.radio(
-            "Régime fiscal",
-            options=["IS (par défaut)", "IR (option 5 premiers exercices)"],
-            key="sasu_regime",
-            horizontal=True,
-        )
-        sasu_is = sasu_regime.startswith("IS")
+        sasu_rs = st.radio("Régime social",
+            ["Assimilé salarié (classique)", "TNS (gérant minoritaire/égalitaire)"],
+            key="sasu_rs",
+            help="En SASU unipersonnelle : assimilé salarié. TNS si gérant minoritaire dans SAS multi-associés.")
+        sasu_rs_key = "assimile_salarie" if sasu_rs.startswith("Assimilé") else "tns"
+        cfg_rs_sasu = CONFIG["cotisations_assimile_salarie"] if sasu_rs_key == "assimile_salarie" else CONFIG["cotisations_tns"]
+        taux_cout_sasu = cfg_rs_sasu["cout_total_pour_1000_net"] / 1000
 
-        def_sal_sasu, def_div_sasu = _valeurs_defaut_sasu_is()
+        sasu_rf = st.radio("Régime fiscal", ["IS", "IR"], key="sasu_rf", horizontal=True,
+            help="IR disponible uniquement sur option, 5 premiers exercices.")
+        sasu_is = (sasu_rf == "IS")
 
         if sasu_is:
             sal_sasu = st.slider(
                 "Salaire net président (€/an)",
-                min_value=0, max_value=int(benefice_brut) if benefice_brut > 0 else 1,
-                value=min(def_sal_sasu, int(benefice_brut)),
-                step=500, key="sal_sasu",
-                help="Minimum 7 212€ brut/an pour valider 4 trimestres retraite",
-            )
-            cout_sal_sasu = sal_sasu * 1.82
-            div_max_sasu = max(0, int(benefice_brut - cout_sal_sasu))
+                0, max(1, int(benef_brut)),
+                min(round(CONFIG["retraite"]["salaire_brut_min_4_trimestres"] / 1.82), int(benef_brut)),
+                500, key="sal_sasu",
+                help=f"Vous saisissez le NET. Coût brut = net × {taux_cout_sasu:.2f} · Min 7 212€ brut = 4 trimestres retraite")
+            cout_sal_sasu = sal_sasu * taux_cout_sasu
+            div_max_sasu  = max(0, int(benef_brut - cout_sal_sasu))
             div_sasu = st.slider(
-                "Dividendes bruts (€/an)",
-                min_value=0, max_value=div_max_sasu,
-                value=min(def_div_sasu, div_max_sasu),
-                step=500, key="div_sasu",
-                help="En SASU, les dividendes ne supportent pas de cotisations sociales (flat tax 31,4% uniquement)",
-            )
-            res_sasu = simuler_sasu(ca, charges_reelles, sal_sasu, div_sasu, nb_parts, "IS")
+                "Dividendes bruts (€/an) — flat tax 31,4%",
+                0, max(1, div_max_sasu),
+                min(round(div_max_sasu * 0.7), div_max_sasu), 500, key="div_sasu",
+                help="Aucune cotisation sociale sur les dividendes en SASU — flat tax 31,4% uniquement")
+            res_sasu = simuler_sasu(ca, charges_reelles, sal_sasu, div_sasu, nb_parts, "IS", sasu_rs_key)
         else:
-            sal_sasu_ir = st.slider(
-                "Salaire net président (€/an)",
-                min_value=0, max_value=int(benefice_brut) if benefice_brut > 0 else 1,
-                value=min(def_sal_sasu, int(benefice_brut)),
-                step=500, key="sal_sasu_ir",
-            )
-            res_sasu = simuler_sasu(ca, charges_reelles, sal_sasu_ir, 0, nb_parts, "IR")
+            st.caption("ℹ️ En IR, le dirigeant est imposé sur tout le bénéfice — pas de slider salaire ni dividendes.")
+            res_sasu = simuler_sasu(ca, charges_reelles, 0, 0, nb_parts, "IR", sasu_rs_key)
 
-        st.divider()
-        st.metric("💰 Revenu net disponible", f"{res_sasu['revenu_net_disponible']:,.0f} €/an")
-        st.metric("📅 Soit par mois", f"{res_sasu['mensuel']['revenu_total_mensuel']:,.0f} €/mois")
-        st.divider()
-        st.markdown(f"**Régime fiscal** : {res_sasu['regime_fiscal']}")
-        st.markdown(f"**Régime social** : {res_sasu['regime_social']}")
-        st.markdown(f"**Cotisations assimilé salarié** : {res_sasu['cotisations_sociales']:,.0f} €")
-        if sasu_is:
-            st.markdown(f"**Bénéfice imposable IS** : {res_sasu['benefice_imposable']:,.0f} €")
-            st.markdown(f"**Impôt sur les sociétés** : {res_sasu['impot_societes']:,.0f} €")
-            st.markdown(f"**Flat tax dividendes** : {res_sasu['flat_tax_dividendes']:,.0f} €")
-            st.markdown(f"**Dividendes nets** : {res_sasu['dividendes_nets']:,.0f} €")
-            st.markdown(f"**Trimestres retraite** : {res_sasu.get('trimestres_retraite_valides', 0)}/4 validés")
-        st.markdown(f"**Impôt sur le revenu** : {res_sasu['impot_revenu']:,.0f} €")
-        st.markdown(f"**TMI** : {res_sasu['tmi']}%  ·  Taux moyen IR : {res_sasu['taux_moyen_ir']}%")
+        afficher_statut(res_sasu)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — RECOMMANDATION FINALE
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 3 — RECOMMANDATION
+# ═════════════════════════════════════════════════════════════════════════════
 st.divider()
-st.subheader("③ Recommandation et synthèse")
+st.subheader("③ Recommandation & synthèse")
 
-# Construire le classement à partir des résultats actuels (avec les sliders)
-resultats_courants = {
-    "micro": res_micro,
-    "eurl":  res_eurl,
-    "sasu":  res_sasu,
-}
+resultats = {}
+if res_micro:
+    resultats["Micro-entreprise"] = res_micro
+resultats[f"EURL ({eurl_rf})"]  = res_eurl
+resultats[f"SASU ({sasu_rf})"]  = res_sasu
 
-classement = sorted(
-    [(k, v) for k, v in resultats_courants.items() if v.get("eligible", True)],
-    key=lambda x: x[1]["revenu_net_disponible"],
-    reverse=True,
-)
+classement = sorted(resultats.items(),
+    key=lambda x: x[1]["synthese"]["revenu_net_disponible"], reverse=True)
 
-labels = {"micro": "Micro-entreprise", "eurl": f"EURL ({res_eurl['regime_fiscal']})", "sasu": f"SASU ({res_sasu['regime_fiscal']})"}
 medailles = ["🥇", "🥈", "🥉"]
+best_nom, best_res = classement[0]
+st.success(f"**{medailles[0]} Statut optimal : {best_nom}** — **{best_res['synthese']['revenu_net_disponible']:,.0f} €/an** net en poche")
+if best_res["tresorerie"]["applicable"] and best_res["tresorerie"]["compte_boite"] > 0:
+    st.info(f"💡 + {best_res['tresorerie']['compte_boite']:,.0f} € en trésorerie dans la société")
 
-# Bannière recommandation
-if classement:
-    meilleur_k, meilleur_v = classement[0]
-    st.success(f"**{medailles[0]} Statut optimal avec ces paramètres : {labels[meilleur_k]}** — {meilleur_v['revenu_net_disponible']:,.0f} €/an net disponible")
+# Tableau comparatif
+st.markdown("#### Tableau comparatif")
+rows = []
+for nom, r in classement:
+    s   = r["synthese"]
+    sal = r["salaire"]
+    div = r["dividendes"]
+    tre = r["tresorerie"]
+    ent = r["entreprise"]
+    rows.append({
+        "Statut"                          : nom,
+        "💰 Net en poche / an"            : f"{s['revenu_net_disponible']:,.0f} €",
+        "📅 Net en poche / mois"          : f"{s['revenu_net_disponible']/12:,.0f} €",
+        "🏦 Trésorerie boîte"             : f"{tre['compte_boite']:,.0f} €" if tre["applicable"] else "—",
+        "🏛️ IS payé"                     : f"{ent['impot_societes']:,.0f} €" if ent.get("impot_societes") else "—",
+        "💼 Cotisations sociales"         : f"{sal['cotisations']:,.0f} €  ({sal['taux_cotisations']*100:.0f}%)",
+        "📊 IR personnel"                 : f"{sal['ir_personnel']:,.0f} €  (TMI {sal['tmi']}%)",
+        "📈 Flat tax dividendes"          : f"{div['montant_flat_tax']:,.0f} €" if div["applicable"] else "—",
+        "🔰 Trimestres retraite"          : f"{s['trimestres_retraite']}/4" if s.get("trimestres_retraite") is not None else "N/A",
+    })
 
-    if situation_are:
-        st.warning("⚠️ **Avec l'ARE :** la SASU sans salaire (0€) est souvent la meilleure stratégie pour maintenir vos allocations intégralement. En EURL, des cotisations minimales (~1 160€/an) sont dues même sans rémunération.")
-
-# Tableau de synthèse comparatif
-st.markdown("#### Tableau comparatif avec vos paramètres")
-
-colonnes = ["Critère"] + [labels[k] for k, _ in classement]
-lignes = []
-
-def fmt(v, suffix="€"):
-    if isinstance(v, (int, float)):
-        return f"{v:,.0f} {suffix}" if suffix else f"{v:,.0f}"
-    return str(v)
-
-for k, v in classement:
-    pass  # just iterate to build rows
-
-rows_data = {
-    "💰 Revenu net disponible / an":   {k: fmt(v["revenu_net_disponible"]) for k,v in classement},
-    "📅 Revenu net disponible / mois": {k: fmt(v["mensuel"]["revenu_total_mensuel"]) for k,v in classement},
-    "🏛️ Régime fiscal":               {k: v["regime_fiscal"] for k,v in classement},
-    "👷 Régime social":               {k: v["regime_social"] for k,v in classement},
-    "📊 Cotisations sociales":         {k: fmt(v["cotisations_sociales"]) for k,v in classement},
-    "💼 Impôt sur le revenu (IR)":    {k: fmt(v["impot_revenu"]) for k,v in classement},
-    "🏢 Impôt sur les sociétés (IS)": {k: fmt(v["impot_societes"]) for k,v in classement},
-    "📈 Flat tax dividendes":          {k: fmt(v["flat_tax_dividendes"]) for k,v in classement},
-    "💸 Dividendes nets":              {k: fmt(v["dividendes_nets"]) for k,v in classement},
-    "📉 TMI":                          {k: f"{v['tmi']}%" for k,v in classement},
-    "📉 Taux moyen IR":                {k: f"{v['taux_moyen_ir']}%" for k,v in classement},
-}
-
-import pandas as pd
-table_rows = []
-for critere, vals in rows_data.items():
-    row = {"Critère": critere}
-    for k, v in classement:
-        row[labels[k]] = vals.get(k, "—")
-    table_rows.append(row)
-
-df = pd.DataFrame(table_rows).set_index("Critère")
+df = pd.DataFrame(rows).set_index("Statut")
 st.dataframe(df, use_container_width=True)
 
-# Détail mensuel
-st.markdown("#### Détail mensuel")
-cols_mensuel = st.columns(len(classement))
-for i, (k, v) in enumerate(classement):
-    with cols_mensuel[i]:
-        st.markdown(f"**{medailles[i]} {labels[k]}**")
-        m = v["mensuel"]
-        st.markdown(f"- Salaire / revenu net : **{m['salaire_net_mensuel']:,.0f} €**")
-        st.markdown(f"- Cotisations : {m['cotisations_mensuelles']:,.0f} €")
-        st.markdown(f"- IR mensuel (estimé) : {m['impot_revenu_mensuel']:,.0f} €")
-        if m.get("dividendes_nets_mensuel", 0) > 0:
-            st.markdown(f"- Dividendes nets : {m['dividendes_nets_mensuel']:,.0f} €")
-        st.markdown(f"- **Total en poche : {m['revenu_total_mensuel']:,.0f} €/mois**")
-
-# Points d'attention contextuels
-st.markdown("#### Points d'attention")
-cfg_micro = CONFIG["micro_entreprise"]
-abattement_montant = ca * cfg_micro["abattements"][type_activite]
-
+# Points d'attention
+st.markdown("#### ⚠️ Points d'attention")
 col_a, col_b = st.columns(2)
 with col_a:
-    if ca > cfg_micro[f"plafond_ca_{type_activite}"]:
-        st.error(f"❌ **Micro impossible** : CA {ca:,.0f}€ > plafond {cfg_micro[f'plafond_ca_{type_activite}']:,.0f}€")
-    if charges_reelles > abattement_montant:
-        st.warning(f"📊 Vos charges réelles ({charges_reelles:,.0f}€) dépassent l'abattement micro ({abattement_montant:,.0f}€) → une société est fiscalement plus intéressante")
+    if ca > plafond:
+        st.error(f"❌ Micro impossible : CA {ca:,.0f}€ > plafond {plafond:,.0f}€")
+    abt = cfg_micro["abattements"][type_activite]
+    abt_montant = ca * abt
+    if charges_reelles > abt_montant:
+        st.warning(f"📊 Charges réelles ({charges_reelles:,.0f}€) > abattement micro ({abt_montant:,.0f}€) → société plus avantageuse")
     else:
-        st.info(f"📊 Abattement micro ({abattement_montant:,.0f}€) > vos charges réelles ({charges_reelles:,.0f}€) → micro avantageuse sur ce critère")
+        st.info(f"📊 Abattement micro ({abt_montant:,.0f}€) ≥ charges réelles ({charges_reelles:,.0f}€) → micro avantageuse sur ce critère")
 
 with col_b:
-    sal_brut_sasu = res_sasu.get("salaire_brut_annuel", 0)
-    trim_min = CONFIG["retraite"]["salaire_brut_min_4_trimestres"]
-    if sal_brut_sasu < trim_min and res_sasu["regime_fiscal"] == "IS":
-        st.warning(f"⚠️ **Retraite SASU** : salaire brut ({sal_brut_sasu:,.0f}€) < {trim_min:,.0f}€ → moins de 4 trimestres validés")
     seuil_div_eurl = round(capital_social * 0.10)
-    if res_eurl.get("dividendes_bruts", 0) > seuil_div_eurl:
-        st.warning(f"⚠️ **EURL dividendes** : {res_eurl['dividendes_bruts']:,.0f}€ versés > seuil TNS ({seuil_div_eurl:,}€) → cotisations supplémentaires appliquées")
+    if res_eurl["dividendes"]["applicable"] and res_eurl["dividendes"].get("dividendes_bruts", 0) > seuil_div_eurl:
+        st.warning(f"⚠️ EURL : dividendes ({res_eurl['dividendes']['dividendes_bruts']:,.0f}€) > seuil TNS ({seuil_div_eurl:,}€) → cotisations TNS supplémentaires")
+    if sasu_is:
+        trim_sasu = res_sasu["synthese"].get("trimestres_retraite", 0) or 0
+        if trim_sasu < 4:
+            st.warning(f"⚠️ SASU : {trim_sasu}/4 trimestres retraite validés — augmenter le salaire brut jusqu'à 7 212€/an minimum")
 
-# Disclaimer
 st.divider()
-st.caption(
-    "⚠️ Simulation indicative basée sur les barèmes 2026. Ne constitue pas un conseil fiscal ou juridique. "
-    "Consultez un expert-comptable pour votre situation personnelle."
-)
+st.caption("⚠️ Simulation indicative — barèmes 2026. Ne constitue pas un conseil fiscal ou juridique. Consultez un expert-comptable.")
