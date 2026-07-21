@@ -119,18 +119,24 @@ def simuler_eurl(
         cotisations_sal = round(remuneration_net * (taux_cout - 1), 2)
         salaire_brut    = round(remuneration_net + cotisations_sal, 2)
 
-        # ── Cotisations TNS sur dividendes (si > 10% capital) ───────────
+        # ── IS : calculé sur le bénéfice AVANT distribution de dividendes ─
+        # Les cotisations TNS sur dividendes ne sont PAS déduites du bénéfice IS
+        # (elles sont dues par le dirigeant sur les dividendes reçus, pas par la société)
+        benef_imposable_is = round(max(0, ca - charges_deductibles - salaire_brut), 2)
+        is_res             = calculer_is(benef_imposable_is)
+        montant_is         = is_res["montant_is"]
+
+        # ── Bénéfice distribuable = bénéfice après IS ───────────────────
+        benef_apres_is     = round(max(0, benef_imposable_is - montant_is), 2)
+        # Les dividendes ne peuvent pas dépasser le bénéfice après IS
+        dividendes_bruts   = round(min(dividendes_bruts, benef_apres_is), 2)
+
+        # ── Cotisations TNS sur dividendes (dues par le dirigeant) ───────
+        # Calculées APRÈS avoir plafonné les dividendes au bénéfice après IS
         seuil_div_tns      = round(capital_social * cfg_tns["seuil_dividendes_soumis_cotisations_pct"], 2)
         div_soumis_tns     = round(max(0, dividendes_bruts - seuil_div_tns), 2)
         cotisations_div    = round(div_soumis_tns * (taux_cout - 1), 2)
         total_cotisations  = round(cotisations_sal + cotisations_div, 2)
-
-        # ── IS ───────────────────────────────────────────────────────────
-        # Bénéfice avant IS = CA - charges - salaire brut - coti div
-        benef_brut_is      = round(ca - charges_deductibles - salaire_brut - cotisations_div, 2)
-        benef_apres_div    = round(max(0, benef_brut_is - dividendes_bruts), 2)
-        is_res             = calculer_is(benef_apres_div)
-        montant_is         = is_res["montant_is"]
 
         # ── Flat tax dividendes ──────────────────────────────────────────
         ft                 = calculer_flat_tax(dividendes_bruts)
@@ -142,12 +148,11 @@ def simuler_eurl(
         ir                 = calculer_ir(remuneration_net, nb_parts)
         montant_ir         = ir["montant_ir"]
 
-        # ── Trésorerie restante ──────────────────────────────────────────
-        # Boîte : ce qu'il reste après IS, dividendes bruts distribués
-        tresorerie         = round(max(0, benef_apres_div - montant_is), 2)
+        # ── Trésorerie = bénéfice après IS − dividendes distribués ───────
+        tresorerie         = round(max(0, benef_apres_is - dividendes_bruts), 2)
 
-        # ── Revenu net perso ─────────────────────────────────────────────
-        revenu_net         = round(max(0, remuneration_net - montant_ir + dividendes_nets), 2)
+        # ── Revenu net perso (salaire net après IR + dividendes nets − coti TNS div) ─
+        revenu_net         = round(max(0, remuneration_net - montant_ir + dividendes_nets - cotisations_div), 2)
 
         return {
             "statut"        : "EURL (IS)",
@@ -161,10 +166,10 @@ def simuler_eurl(
                 "abattement_forfaitaire": 0,
                 "taux_abattement"       : 0,
                 "regime_fiscal"         : "IS (15% ≤ 42 500€ · 25% au-delà)",
-                "base_imposable_is"     : benef_apres_div,
+                "base_imposable_is"     : benef_imposable_is,
                 "impot_societes"        : montant_is,
                 "taux_is_effectif"      : is_res["taux_effectif"],
-                "reste_apres_impots"    : round(benef_apres_div - montant_is, 2),
+                "reste_apres_impots"    : benef_apres_is,
             },
 
             "salaire": {
@@ -198,7 +203,7 @@ def simuler_eurl(
             "tresorerie": {
                 "applicable"   : True,
                 "compte_boite" : tresorerie,
-                "detail"       : f"CA {ca:,.0f}€ − charges {charges_deductibles:,.0f}€ − salaire brut {salaire_brut:,.0f}€ − coti div {cotisations_div:,.0f}€ − dividendes {dividendes_bruts:,.0f}€ − IS {montant_is:,.0f}€",
+                "detail"       : f"Bénéfice imposable IS : {benef_imposable_is:,.0f}€ − IS {montant_is:,.0f}€ = {benef_apres_is:,.0f}€ après IS − dividendes {dividendes_bruts:,.0f}€ distribués",
             },
 
             "synthese": {
@@ -308,24 +313,29 @@ def simuler_sasu(
         pass_trim    = CONFIG["retraite"]["salaire_brut_min_1_trimestre"]
         trimestres   = min(4, int(salaire_brut / pass_trim)) if salaire_brut > 0 else 0
 
-        # IS
-        benef_brut_is  = round(ca - charges_deductibles - salaire_brut, 2)
-        benef_apres_div = round(max(0, benef_brut_is - dividendes_bruts), 2)
-        is_res         = calculer_is(benef_apres_div)
-        montant_is     = is_res["montant_is"]
+        # IS : calculé sur le bénéfice AVANT distribution de dividendes
+        benef_imposable_is = round(max(0, ca - charges_deductibles - salaire_brut), 2)
+        is_res             = calculer_is(benef_imposable_is)
+        montant_is         = is_res["montant_is"]
+
+        # Bénéfice distribuable = bénéfice après IS
+        benef_apres_is     = round(max(0, benef_imposable_is - montant_is), 2)
+        # Les dividendes ne peuvent pas dépasser le bénéfice après IS
+        dividendes_bruts   = round(min(dividendes_bruts, benef_apres_is), 2)
 
         # Flat tax dividendes (pas de cotisations sociales sur dividendes en SASU ✅)
-        ft             = calculer_flat_tax(dividendes_bruts)
-        montant_ft     = ft["montant_flat_tax"]
-        dividendes_nets = ft["dividendes_nets"]
-        taux_ft        = CONFIG["flat_tax"]["taux_global"]
+        ft                 = calculer_flat_tax(dividendes_bruts)
+        montant_ft         = ft["montant_flat_tax"]
+        dividendes_nets    = ft["dividendes_nets"]
+        taux_ft            = CONFIG["flat_tax"]["taux_global"]
 
         # IR personnel sur salaire seul
-        ir             = calculer_ir(salaire_net, nb_parts)
-        montant_ir     = ir["montant_ir"]
+        ir                 = calculer_ir(salaire_net, nb_parts)
+        montant_ir         = ir["montant_ir"]
 
-        tresorerie     = round(max(0, benef_apres_div - montant_is), 2)
-        revenu_net     = round(max(0, salaire_net - montant_ir + dividendes_nets), 2)
+        # Trésorerie = bénéfice après IS − dividendes distribués
+        tresorerie         = round(max(0, benef_apres_is - dividendes_bruts), 2)
+        revenu_net         = round(max(0, salaire_net - montant_ir + dividendes_nets), 2)
 
         return {
             "statut"        : "SASU (IS)",
@@ -340,10 +350,10 @@ def simuler_sasu(
                 "abattement_forfaitaire": 0,
                 "taux_abattement"       : 0,
                 "regime_fiscal"         : "IS (15% ≤ 42 500€ · 25% au-delà)",
-                "base_imposable_is"     : benef_apres_div,
+                "base_imposable_is"     : benef_imposable_is,
                 "impot_societes"        : montant_is,
                 "taux_is_effectif"      : is_res["taux_effectif"],
-                "reste_apres_impots"    : round(benef_apres_div - montant_is, 2),
+                "reste_apres_impots"    : benef_apres_is,
             },
 
             "salaire": {
@@ -377,7 +387,7 @@ def simuler_sasu(
             "tresorerie": {
                 "applicable"   : True,
                 "compte_boite" : tresorerie,
-                "detail"       : f"CA {ca:,.0f}€ − charges {charges_deductibles:,.0f}€ − salaire brut {salaire_brut:,.0f}€ − dividendes {dividendes_bruts:,.0f}€ − IS {montant_is:,.0f}€",
+                "detail"       : f"Bénéfice imposable {benef_imposable_is:,.0f}€ − IS {montant_is:,.0f}€ = {benef_apres_is:,.0f}€ après IS − dividendes {dividendes_bruts:,.0f}€ distribués",
             },
 
             "synthese": {
