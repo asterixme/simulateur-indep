@@ -125,21 +125,30 @@ def _afficher_detail(res: dict):
 
     # ── Dividendes ────────────────────────────────────────────────────────
     if div["applicable"]:
-        with st.expander("📈 Dividendes", expanded=True):
+        with st.expander("📈 Dividendes", expanded=False):
             ligne("Dividendes bruts versés", div["dividendes_bruts"])
-            if div.get("cotisations_tns_div", 0) > 0:
-                ligne("Cotisations TNS sur dividendes",
-                      div["cotisations_tns_div"], negatif=True,
-                      note=div["detail_coti_div"], gras=True)
+            seuil = div.get("seuil_tns", 0)
+            if seuil and div.get("div_hors_seuil", 0) > 0:
+                # EURL : deux tranches avec traitement différent
+                st.markdown(f"**Seuil TNS : {seuil:,.0f} € (10% du capital)**")
+                separateur()
+                st.markdown(f"*Part ≤ seuil : {div['div_sous_seuil']:,.0f} € → Flat tax complète 31,4%*")
+                ligne("  IR PFU 12,8%", div["ft_sous_seuil_ir"], negatif=True)
+                ligne("  Prél. sociaux 17,2% + PS 1,4%", div["ft_sous_seuil_ps"], negatif=True)
+                separateur()
+                st.markdown(f"*Part > seuil : {div['div_hors_seuil']:,.0f} € → Cotisations SSI + IR PFU (sans PS)*")
+                ligne(f"  Cotisations SSI 45%", div["cotisations_ssi_div"], negatif=True, gras=True)
+                ligne("  IR PFU 12,8% (PS remplacés par SSI)", div["ft_hors_seuil_ir"], negatif=True)
+                separateur()
             else:
-                st.caption(f"ℹ️ {div.get('detail_coti_div','')}")
-            ligne("Flat tax (PFU)",
-                  div["montant_flat_tax"], negatif=True,
-                  note=div["detail_flat_tax"], gras=True)
+                # SASU ou EURL sous seuil : flat tax simple
+                st.caption(div.get("detail_flat_tax", ""))
+                ligne("IR PFU 12,8%", div.get("ir_pfu_total", div.get("ft_sous_seuil_ir", 0)), negatif=True)
+                ligne("Prél. sociaux 17,2% + PS 1,4%", div.get("ps_total", 0), negatif=True)
             ligne("Dividendes nets reçus", div["dividendes_nets"], gras=True)
             separateur()
-            ligne("Total impôts sur dividendes", div["total_impots_dividendes"],
-                  note="Flat tax + éventuelles cotisations TNS")
+            ligne("Total prélèvements sur dividendes", div["total_impots_dividendes"], gras=True,
+                  note="Cotisations SSI + flat tax")
     elif not div["applicable"] and is_mode is False:
         with st.expander("📈 Dividendes", expanded=False):
             st.caption(f"⚠️ {div.get('raison', '')}")
@@ -235,11 +244,9 @@ with col_eurl:
         st.markdown("### 🟨 EURL")
         st.caption("IS ou IR · TNS (SSI) · Dividendes possibles à l'IS")
 
-        st.caption("Régime social : **TNS (SSI)** — obligatoire pour le gérant majoritaire")
-        eurl_rf = st.radio("Régime fiscal", ["IS", "IR"], key="eurl_rf", horizontal=True)
+        # Calcul preview via session_state pour afficher les métriques avant les widgets
+        eurl_rf = st.session_state.get("eurl_rf", "IS")
         eurl_is = (eurl_rf == "IS")
-
-        # Calcul avec valeurs actuelles des sliders (session_state) pour afficher les métriques en premier
         _rem_eurl_cur = st.session_state.get("rem_eurl", min(round(benef_brut * 0.5), int(benef_brut)))
         _div_eurl_cur = st.session_state.get("div_eurl", min(seuil_div_eurl, max(0, int(benef_brut - _rem_eurl_cur * taux_cout_tns))))
         if eurl_is:
@@ -247,10 +254,15 @@ with col_eurl:
         else:
             _res_eurl_preview = simuler_eurl(ca, charges_reelles, 0, 0, nb_parts, capital_social, "IR")
 
-        # 1. Métriques en haut
+        # Métriques
         _afficher_metriques(_res_eurl_preview)
 
-        # 2. Sliders
+        # Paramètres
+        st.caption("Régime social : **TNS (SSI)** — obligatoire pour le gérant majoritaire")
+        eurl_rf = st.radio("Régime fiscal", ["IS", "IR"], key="eurl_rf", horizontal=True)
+        eurl_is = (eurl_rf == "IS")
+
+        # 4. Sliders
         if eurl_is:
             rem_eurl = st.slider("Salaire net dirigeant (€/an)",
                 0, max(1, int(benef_brut)),
@@ -276,29 +288,29 @@ with col_sasu:
         st.markdown("### 🟩 SASU")
         st.caption("IS par défaut · Régime social au choix · Dividendes sans cotisations sociales")
 
-        sasu_rs = st.radio("Régime social",
-            ["Assimilé salarié", "TNS (minoritaire)"], key="sasu_rs",
-            help="En SASU unipersonnelle : assimilé salarié.")
-        sasu_rs_key    = "assimile_salarie" if sasu_rs.startswith("Assimilé") else "tns"
-        cfg_rs_sasu    = CONFIG["cotisations_assimile_salarie"] if sasu_rs_key == "assimile_salarie" else CONFIG["cotisations_tns"]
+        # Calcul preview via session_state pour métriques avant widgets
+        cfg_rs_sasu    = CONFIG["cotisations_assimile_salarie"]
         taux_cout_sasu = cfg_rs_sasu["cout_total_pour_1000_net"] / 1000
+        _sasu_rf_cur   = st.session_state.get("sasu_rf", "IS")
+        _sasu_is_cur   = (_sasu_rf_cur == "IS")
+        _sal_sasu_cur  = st.session_state.get("sal_sasu", min(round(CONFIG["retraite"]["salaire_brut_min_4_trimestres"] / 1.82), int(benef_brut)))
+        _cout_sal_cur  = _sal_sasu_cur * taux_cout_sasu
+        _div_sasu_cur  = st.session_state.get("div_sasu", min(round(max(0, benef_brut - _cout_sal_cur) * 0.7), max(0, int(benef_brut - _cout_sal_cur))))
+        if _sasu_is_cur:
+            _res_sasu_preview = simuler_sasu(ca, charges_reelles, _sal_sasu_cur, _div_sasu_cur, nb_parts, "IS")
+        else:
+            _res_sasu_preview = simuler_sasu(ca, charges_reelles, 0, 0, nb_parts, "IR")
+
+        # Métriques en haut
+        _afficher_metriques(_res_sasu_preview)
+
+        # Paramètres
+        st.caption("👷 Régime social : **Assimilé salarié (Régime général)** — obligatoire pour le président de SASU")
         sasu_rf = st.radio("Régime fiscal", ["IS", "IR"], key="sasu_rf", horizontal=True,
             help="IR sur option, 5 premiers exercices uniquement.")
         sasu_is = (sasu_rf == "IS")
 
-        # Calcul preview pour métriques en haut
-        _sal_sasu_cur = st.session_state.get("sal_sasu", min(round(CONFIG["retraite"]["salaire_brut_min_4_trimestres"] / 1.82), int(benef_brut)))
-        _cout_sal_cur = _sal_sasu_cur * taux_cout_sasu
-        _div_sasu_cur = st.session_state.get("div_sasu", min(round(max(0, benef_brut - _cout_sal_cur) * 0.7), max(0, int(benef_brut - _cout_sal_cur))))
-        if sasu_is:
-            _res_sasu_preview = simuler_sasu(ca, charges_reelles, _sal_sasu_cur, _div_sasu_cur, nb_parts, "IS", sasu_rs_key)
-        else:
-            _res_sasu_preview = simuler_sasu(ca, charges_reelles, 0, 0, nb_parts, "IR", sasu_rs_key)
-
-        # 1. Métriques en haut
-        _afficher_metriques(_res_sasu_preview)
-
-        # 2. Sliders
+        # Sliders
         if sasu_is:
             sal_sasu = st.slider("Salaire net président (€/an)",
                 0, max(1, int(benef_brut)),
@@ -310,11 +322,11 @@ with col_sasu:
             div_sasu = st.slider("Dividendes bruts (€/an) — flat tax 31,4%",
                 0, max(1, div_max_sasu),
                 min(round(div_max_sasu * 0.7), div_max_sasu), 500, key="div_sasu",
-                help="Pas de cotisations sociales sur dividendes en SASU")
-            res_sasu = simuler_sasu(ca, charges_reelles, sal_sasu, div_sasu, nb_parts, "IS", sasu_rs_key)
+                help="Pas de cotisations sociales sur dividendes en SASU — flat tax 31,4% uniquement")
+            res_sasu = simuler_sasu(ca, charges_reelles, sal_sasu, div_sasu, nb_parts, "IS")
         else:
             st.caption("En IR, le dirigeant est imposé sur tout le bénéfice — pas de slider.")
-            res_sasu = simuler_sasu(ca, charges_reelles, 0, 0, nb_parts, "IR", sasu_rs_key)
+            res_sasu = simuler_sasu(ca, charges_reelles, 0, 0, nb_parts, "IR")
 
         # 3. Détail
         _afficher_detail(res_sasu)
@@ -328,7 +340,7 @@ resultats = {}
 if res_micro:
     resultats["Micro-entreprise"] = res_micro
 resultats[f"EURL ({eurl_rf})"]  = res_eurl
-resultats[f"SASU ({sasu_rf})"]  = res_sasu
+resultats[f"SASU ({sasu_rf}) — Assimilé salarié"] = res_sasu
 
 classement = sorted(resultats.items(),
     key=lambda x: x[1]["synthese"]["revenu_net_disponible"], reverse=True)
